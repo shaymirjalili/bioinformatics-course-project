@@ -1,12 +1,13 @@
 # ============================================================
-# WGCNA Figure 4 Reproduction Script
+# WGCNA Figure 4 Reproduction Script (FIXED)
 # ============================================================
-# This script reproduces the WGCNA results and plots as described:
-# - Uses power=16 for scale-free topology
-# - Divides DEGs into modules
-# - Highlights ZBTB16 as a core gene
-# - Produces Figure 4A (scale independence, mean connectivity),
-#   Figure 4B (dendrogram), and Figure 4C (TOM heatmap)
+# Fixes applied:
+# 1) Correctly aligns genes across datasets BEFORE cbind (prevents scrambled rows)
+# 2) Collapses duplicate probes -> one gene (mean) instead of dropping randomly
+# 3) Uses TOMsimilarityFromExpr (more stable, standard WGCNA)
+# 4) Uses TOMplot (WGCNA-style heatmap with proper coloring)
+# 5) Fixes dendrogram color labels (no mismatch in groupLabels)
+# ============================================================
 
 suppressPackageStartupMessages({
   library(WGCNA)
@@ -16,8 +17,6 @@ suppressPackageStartupMessages({
   library(ggplot2)
 })
 
-
-# Set seed for reproducibility
 set.seed(1234)
 allowWGCNAThreads()
 
@@ -25,79 +24,163 @@ OUTDIR <- "geo_deg_out"
 WGCNA_DIR <- file.path(OUTDIR, "wgcna_figure4")
 dir.create(WGCNA_DIR, showWarnings = FALSE, recursive = TRUE)
 
-# Load overlapping DEGs
+# ----------------------------
+# Helpers
+# ----------------------------
+clean_symbols <- function(x) {
+  x <- trimws(x)
+  x <- sapply(strsplit(x, " /// "), `[`, 1)   # keep first symbol if "A /// B"
+  x <- gsub("\\s+", "", x)
+  x <- toupper(x)
+  x[x == ""] <- NA_character_
+  x
+}
+
+collapse_by_gene_mean <- function(expr_mat) {
+  # rows=genes/probes, cols=samples, rownames are symbols (may repeat)
+  rn <- rownames(expr_mat)
+  keep <- !is.na(rn) & rn != ""
+  expr_mat <- expr_mat[keep, , drop = FALSE]
+  rn <- rn[keep]
+
+  # mean across duplicates
+  # rowsum() sums; divide by counts to get mean
+  sums <- rowsum(expr_mat, group = rn, reorder = FALSE)
+  counts <- as.numeric(table(rn))[match(rownames(sums), names(table(rn)))]
+  means <- sweep(sums, 1, counts, "/")
+  means
+}
+
+# ----------------------------
+# Load overlapping DEGs (symbols)
+# ----------------------------
 common_up <- readLines(file.path(OUTDIR, "overlap_up_symbols.txt"))
 common_down <- readLines(file.path(OUTDIR, "overlap_down_symbols.txt"))
-all_overlapping_genes <- c(common_up, common_down)
+all_overlapping_genes <- unique(clean_symbols(c(common_up, common_down)))
+all_overlapping_genes <- all_overlapping_genes[!is.na(all_overlapping_genes)]
 
+# ----------------------------
 # Load expression data from all datasets
-source("data_gathering.R")
+# ----------------------------
+source("data_gathering.R")  # must define: get_eset(), maybe_log2(), extract_symbol()
+
 gse_ids <- c("GSE3268", "GSE1987", "GSE31547", "GSE18842")
 expr_list <- list()
+
 for (gse_id in gse_ids) {
+  message("Loading ", gse_id, " ...")
   eset <- get_eset(gse_id)
+
   expr <- exprs(eset)
   expr <- maybe_log2(expr)
+
   fdat <- fData(eset)
-  symbols <- extract_symbol(fdat)
-  if (!is.null(symbols)) {
-    rownames(expr) <- symbols
-    expr_list[[gse_id]] <- expr
-  }
+  symbols <- extract_symbol(fdat)  # vector aligned with rows(expr)
+
+  if (is.null(symbols)) stop("No gene symbols extracted for ", gse_id)
+
+  symbols <- clean_symbols(symbols)
+  rownames(expr) <- symbols
+
+  # collapse duplicate probes -> one gene
+  expr_gene <- collapse_by_gene_mean(expr)
+
+  # keep only overlapping genes (for speed), but do not force intersection yet
+  expr_gene <- expr_gene[rownames(expr_gene) %in% all_overlapping_genes, , drop = FALSE]
+
+  expr_list[[gse_id]] <- expr_gene
 }
-all_genes <- unique(unlist(lapply(expr_list, rownames)))
-overlapping_in_data <- intersect(all_overlapping_genes, all_genes)
-combined_expr <- c()
+
+# ----------------------------
+# CRITICAL: genes must exist in ALL datasets (intersection)
+# Otherwise you get NAs / weird sparsity
+# ----------------------------
+genes_in_all <- Reduce(intersect, lapply(expr_list, rownames))
+overlapping_in_data <- intersect(all_overlapping_genes, genes_in_all)
+
+if (length(overlapping_in_data) < 30) {
+  stop("Too few genes (", length(overlapping_in_data),
+       ") remain after intersecting across datasets. WGCNA will be unstable.")
+}
+
+# Keep stable order
+overlapping_in_data <- sort(overlapping_in_data)
+
+# ----------------------------
+# Combine expression matrices (ALIGNED rows!)
+# ----------------------------
+combined_expr <- NULL
 for (gse_id in names(expr_list)) {
   expr <- expr_list[[gse_id]]
-  expr_subset <- expr[rownames(expr) %in% overlapping_in_data, ]
-  expr_subset <- expr_subset[!duplicated(rownames(expr_subset)), ]
-  combined_expr <- cbind(combined_expr, expr_subset)
-}
-expr_wgcna <- t(combined_expr[overlapping_in_data, ])
-if (anyNA(expr_wgcna)) {
-  expr_wgcna <- expr_wgcna[, colSums(is.na(expr_wgcna)) == 0]
+
+  # enforce identical gene order before cbind (THIS FIXES THE SCRAMBLING BUG)
+  expr_subset <- expr[overlapping_in_data, , drop = FALSE]
+
+  combined_expr <- if (is.null(combined_expr)) expr_subset else cbind(combined_expr, expr_subset)
 }
 
-# Figure 4A: Soft threshold selection (power=16)
-png(file.path(WGCNA_DIR, "figure_4a.png"), width = 1000, height = 500)
+# WGCNA needs: samples x genes
+expr_wgcna <- t(combined_expr)
+
+# Safety check
+gsg <- goodSamplesGenes(expr_wgcna, verbose = 3)
+if (!gsg$allOK) {
+  expr_wgcna <- expr_wgcna[gsg$goodSamples, gsg$goodGenes]
+}
+
+message("WGCNA matrix: ", nrow(expr_wgcna), " samples x ", ncol(expr_wgcna), " genes")
+
+# ----------------------------
+# Figure 4A: Soft threshold selection
+# ----------------------------
+png(file.path(WGCNA_DIR, "figure_4a.png"), width = 1100, height = 550, res = 140)
 par(mfrow = c(1, 2))
-powers <- seq(1, 30, by = 1)
-sft <- pickSoftThreshold(expr_wgcna, powerVector = powers, verbose = 5)
-# Left: Scale independence
-plot(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
-     main = "Scale Independence",
-     xlab = "Soft Threshold(power)",
+
+powers <- 1:30
+sft <- pickSoftThreshold(expr_wgcna, powerVector = powers, networkType = "signed", verbose = 5)
+
+# Scale independence
+plot(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     xlab = "Soft Threshold (power)",
      ylab = "Scale Free Topology Model Fit, signed R^2",
-     type = "n", ylim = c(-0.2, 0.5))
-points(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
-       col = "black", pch = 20, cex = 2)
+     main = "Scale Independence",
+     type = "n")
+points(sft$fitIndices[, 1],
+       -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+       pch = 20, cex = 1.6)
 abline(h = 0.5, col = "red", lwd = 2)
-text(sft$fitIndices[, 1], -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
-     labels = sft$fitIndices[, 1], cex = 0.9, col = "black", adj = c(0, -0.5))
-# Right: Mean connectivity
+text(sft$fitIndices[, 1],
+     -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+     labels = sft$fitIndices[, 1], cex = 0.75, pos = 3)
+
+# Mean connectivity
 plot(sft$fitIndices[, 1], sft$fitIndices[, 5],
-     main = "Mean Connectivity",
-     xlab = "Soft Threshold(power)",
+     xlab = "Soft Threshold (power)",
      ylab = "Mean Connectivity",
+     main = "Mean Connectivity",
      type = "n")
 points(sft$fitIndices[, 1], sft$fitIndices[, 5],
-       col = "black", pch = 20, cex = 2)
-abline(h = 0, col = "red", lwd = 2)
+       pch = 20, cex = 1.6)
 text(sft$fitIndices[, 1], sft$fitIndices[, 5],
-     labels = sft$fitIndices[, 1], cex = 0.9, col = "black", adj = c(0, -0.5))
+     labels = sft$fitIndices[, 1], cex = 0.75, pos = 3)
+
 dev.off()
 
-# Use power=16
+# Use the paper's power
 soft_threshold <- 16
-adjacency <- adjacency(expr_wgcna, power = soft_threshold, type = "signed hybrid")
-TOM <- TOMsimilarity(adjacency, TOMType = "signed")
+
+# ----------------------------
+# Build TOM (standard, stable)
+# ----------------------------
+TOM <- TOMsimilarityFromExpr(expr_wgcna, power = soft_threshold, networkType = "signed")
 dissTOM <- 1 - TOM
 
-
 geneTree <- hclust(as.dist(dissTOM), method = "average")
-minModuleSize <- 10  # Lower to allow more genes in modules
-deepSplit <- 1       # Slightly more sensitive
+
+minModuleSize <- 10
+deepSplit <- 1
+
 dynamicMods <- cutreeDynamic(
   dendro = geneTree,
   distM = dissTOM,
@@ -107,55 +190,57 @@ dynamicMods <- cutreeDynamic(
 )
 dynamicColors <- labels2colors(dynamicMods)
 
-# Merge all non-gray modules into turquoise
-module_summary <- table(dynamicColors)
+# (Optional but useful) merge similar modules
+MEList <- moduleEigengenes(expr_wgcna, colors = dynamicColors)
+MEs <- MEList$eigengenes
+merge <- mergeCloseModules(expr_wgcna, dynamicColors, cutHeight = 0.25, verbose = 3)
+mergedColors <- merge$colors
+mergedMEs <- merge$newMEs
 
+module_summary <- table(mergedColors)
+
+# ----------------------------
 # Figure 4B: Dendrogram
-png(file.path(WGCNA_DIR, "figure_4b.png"), width = 800, height = 400)
-plotDendroAndColors(geneTree, dynamicColors,
-                    groupLabels = c("DynamicTreeCut", "MergedDynamic"),
-                    dendroLabels = FALSE,
-                    hang = 0.03,
-                    addGuide = TRUE,
-                    guideHang = 0.05,
-                    main = "Cluster Dendrogram")
-dev.off()
-
-# Figure 4C: TOM heatmap (matching dendrogram order)
-# Use the same gene order as the dendrogram for the heatmap
-gene_order <- geneTree$order
-TOM_ordered <- TOM[gene_order, gene_order]
-module_colors_ordered <- dynamicColors[gene_order]
-
-png(file.path(WGCNA_DIR, "figure_4c.png"), width = 800, height = 800)
-heatmap(
-  TOM_ordered,
-  Rowv = as.dendrogram(geneTree),
-  Colv = as.dendrogram(geneTree),
-  main = "Network heatmap plot, all genes",
-  breaks = seq(0, 1, length.out = 100),
-  col = colorRampPalette(c("white", "yellow", "orange", "red"))(99),
-  symm = TRUE,
-  margins = c(10, 10),
-  labRow = FALSE,
-  labCol = FALSE
+# ----------------------------
+png(file.path(WGCNA_DIR, "figure_4b.png"), width = 1100, height = 500, res = 140)
+plotDendroAndColors(
+  geneTree,
+  cbind(dynamicColors, mergedColors),
+  groupLabels = c("DynamicTreeCut", "Merged"),
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05,
+  main = "Cluster Dendrogram"
 )
 dev.off()
 
-# Module summary and ZBTB16 core check
-cat("\nWGCNA module summary (power=16):\n")
+# ----------------------------
+# Figure 4C: TOM heatmap (WGCNA style, colored correctly)
+# ----------------------------
+# This produces the "blocky" colored TOM plot like many papers.
+png(file.path(WGCNA_DIR, "figure_4c.png"), width = 1100, height = 1100, res = 140)
+TOMplot(dissTOM, geneTree, mergedColors, main = "Network heatmap plot, all genes")
+dev.off()
+
+# ----------------------------
+# ZBTB16 module check
+# ----------------------------
+cat("\nWGCNA module summary (power=16, merged colors):\n")
 print(module_summary)
+
 if ("ZBTB16" %in% colnames(expr_wgcna)) {
-  zbtb16_module <- dynamicColors[which(colnames(expr_wgcna) == "ZBTB16")]
+  zbtb16_module <- mergedColors[which(colnames(expr_wgcna) == "ZBTB16")]
   cat("ZBTB16 is in module:", zbtb16_module, "\n")
 } else {
-  cat("ZBTB16 not found in the expression matrix.\n")
+  cat("ZBTB16 not found in expr_wgcna columns.\n")
 }
 
 # Save module assignments
 module_df <- data.frame(
   gene = colnames(expr_wgcna),
-  module = dynamicColors
+  module_dynamic = dynamicColors,
+  module_merged = mergedColors
 )
 write.csv(module_df, file.path(WGCNA_DIR, "gene_module_assignment.csv"), row.names = FALSE)
 
