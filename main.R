@@ -28,6 +28,64 @@ suppressPackageStartupMessages({
 })
 
 # ----------------------------
+# Install/load enrichment packages (must be before sourcing data_processing.R)
+# ----------------------------
+
+# Only install BiocManager if not already available
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+pkgs_bioc <- c("clusterProfiler", "org.Hs.eg.db", "enrichplot", "pathview", "GOplot")
+pkgs_cran <- c("readr")
+
+# Try to install missing packages
+for (p in pkgs_bioc) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    message("Installing bioconductor package: ", p)
+    tryCatch({
+      BiocManager::install(p, update = FALSE, ask = FALSE, force = TRUE)
+    }, error = function(e) {
+      message("Warning: Failed to install ", p)
+    }, warning = function(w) {
+      message("Warning during install of ", p, ": ", w$message)
+    })
+  }
+}
+
+for (p in pkgs_cran) {
+  if (!requireNamespace(p, quietly = TRUE)) {
+    message("Installing CRAN package: ", p)
+    tryCatch({
+      install.packages(p, repos = "http://cran.r-project.org")
+    }, error = function(e) {
+      message("Warning: Failed to install ", p)
+    })
+  }
+}
+
+# Check which packages are actually available now
+enrichment_available <- requireNamespace("clusterProfiler", quietly = TRUE) &&
+                        requireNamespace("org.Hs.eg.db", quietly = TRUE)
+
+if (enrichment_available && requireNamespace("enrichplot", quietly = TRUE) && 
+    requireNamespace("GOplot", quietly = TRUE)) {
+  suppressPackageStartupMessages({
+    library(clusterProfiler)
+    library(org.Hs.eg.db)
+    library(enrichplot)
+    library(GOplot)
+  })
+  # Load optional packages
+  if (requireNamespace("readr", quietly = TRUE)) {
+    suppressPackageStartupMessages(library(readr))
+  }
+} else {
+  message("Note: Enrichment packages not fully available. Enrichment analysis will be skipped.")
+  enrichment_available <- FALSE
+}
+
+# ----------------------------
 # Source module files
 # ----------------------------
 source("data_gathering.R")
@@ -67,6 +125,23 @@ deg_tables <- list()
 
 for (gse_id in GSES) {
   message("\n=== Processing ", gse_id, " ===")
+  
+  # Check if CSV file already exists
+  csv_file <- file.path(OUTDIR, paste0(gse_id, "_deg_symbol.csv"))
+  if (file.exists(csv_file)) {
+    message("CSV file already exists for ", gse_id, ". Skipping download and processing.")
+    tt_sym <- read.csv(csv_file)
+    deg_tables[[gse_id]] <- tt_sym
+    
+    # Extract DEG sets from existing data
+    deg_sets <- extract_deg_sets(tt_sym, LOGFC_CUTOFF, ADJ_P_CUTOFF)
+    deg_sets_up[[gse_id]] <- deg_sets$up
+    deg_sets_down[[gse_id]] <- deg_sets$down
+    
+    message(gse_id, ": Up=", length(deg_sets$up), " Down=", length(deg_sets$down))
+    next
+  }
+  
   eset <- get_eset(gse_id)
   
   expr <- exprs(eset)
@@ -147,100 +222,75 @@ print(head(common_down, 30))
 # GO + KEGG enrichment for overlapping DEGs
 # ============================================================
 
-# ----------------------------
-# Install/load required packages (run once if needed)
-# ----------------------------
-if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-
-pkgs_bioc <- c("clusterProfiler", "org.Hs.eg.db", "enrichplot", "pathview", "GOplot")
-pkgs_cran <- c("readr")
-
-for (p in pkgs_bioc) {
-  if (!requireNamespace(p, quietly = TRUE)) BiocManager::install(p, update = FALSE, ask = FALSE)
-}
-for (p in pkgs_cran) {
-  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
-}
-
-suppressPackageStartupMessages({
-  library(clusterProfiler)
-  library(org.Hs.eg.db)
-  library(enrichplot)
-  library(readr)
-  library(GOplot)
-})
-
-# Create enrichment output directory
-ENRDIR <- file.path(OUTDIR, "enrichment")
-dir.create(ENRDIR, showWarnings = FALSE, recursive = TRUE)
-
-# Perform enrichment analysis
-enrich_results <- perform_enrichment(common_up, common_down, ENRDIR)
-
-# Save enrichment results
-save_enrich(enrich_results$all$bp, "GO_BP_all_overlap", ENRDIR)
-save_enrich(enrich_results$all$cc, "GO_CC_all_overlap", ENRDIR)
-save_enrich(enrich_results$all$mf, "GO_MF_all_overlap", ENRDIR)
-save_enrich(enrich_results$all$kegg, "KEGG_all_overlap", ENRDIR)
-
-save_enrich(enrich_results$up$bp, "GO_BP_up_overlap", ENRDIR)
-save_enrich(enrich_results$down$bp, "GO_BP_down_overlap", ENRDIR)
-save_enrich(enrich_results$up$kegg, "KEGG_up_overlap", ENRDIR)
-save_enrich(enrich_results$down$kegg, "KEGG_down_overlap", ENRDIR)
-
-# Save dotplots
-save_dotplot(enrich_results$all$bp, "GO_BP_all_overlap", ENRDIR)
-save_dotplot(enrich_results$all$cc, "GO_CC_all_overlap", ENRDIR)
-save_dotplot(enrich_results$all$mf, "GO_MF_all_overlap", ENRDIR)
-save_dotplot(enrich_results$all$kegg, "KEGG_all_overlap", ENRDIR)
-
-save_dotplot(enrich_results$up$bp, "GO_BP_up_overlap", ENRDIR)
-save_dotplot(enrich_results$down$bp, "GO_BP_down_overlap", ENRDIR)
-save_dotplot(enrich_results$up$kegg, "KEGG_up_overlap", ENRDIR)
-save_dotplot(enrich_results$down$kegg, "KEGG_down_overlap", ENRDIR)
-
-# Save barplots
-save_barplot(enrich_results$all$bp, "GO_BP_all_overlap", ENRDIR)
-save_barplot(enrich_results$all$cc, "GO_CC_all_overlap", ENRDIR)
-save_barplot(enrich_results$all$mf, "GO_MF_all_overlap", ENRDIR)
-save_barplot(enrich_results$all$kegg, "KEGG_all_overlap", ENRDIR)
-
-# Print summary
-cat("\nSaved enrichment results to:\n", normalizePath(ENRDIR), "\n")
-
-cat("\nTop KEGG terms (all overlap):\n")
-if (!is.null(enrich_results$all$kegg) && nrow(as.data.frame(enrich_results$all$kegg)) > 0) {
-  print(as.data.frame(enrich_results$all$kegg)[1:min(10, nrow(as.data.frame(enrich_results$all$kegg))),
-                                                c("ID","Description","p.adjust","Count")])
+if (enrichment_available) {
+  message("\nPerforming enrichment analysis...")
+  
+  # Create enrichment output directory
+  ENRDIR <- file.path(OUTDIR, "enrichment")
+  dir.create(ENRDIR, showWarnings = FALSE, recursive = TRUE)
+  
+  # Perform enrichment analysis
+  enrich_results <- perform_enrichment(common_up, common_down, ENRDIR)
+  
+  # Save enrichment results
+  save_enrich(enrich_results$all$bp, "GO_BP_all_overlap", ENRDIR)
+  save_enrich(enrich_results$all$cc, "GO_CC_all_overlap", ENRDIR)
+  save_enrich(enrich_results$all$mf, "GO_MF_all_overlap", ENRDIR)
+  save_enrich(enrich_results$all$kegg, "KEGG_all_overlap", ENRDIR)
+  
+  save_enrich(enrich_results$up$bp, "GO_BP_up_overlap", ENRDIR)
+  save_enrich(enrich_results$down$bp, "GO_BP_down_overlap", ENRDIR)
+  save_enrich(enrich_results$up$kegg, "KEGG_up_overlap", ENRDIR)
+  save_enrich(enrich_results$down$kegg, "KEGG_down_overlap", ENRDIR)
+  
+  # Save dotplots
+  save_dotplot(enrich_results$all$bp, "GO_BP_all_overlap", ENRDIR)
+  save_dotplot(enrich_results$all$cc, "GO_CC_all_overlap", ENRDIR)
+  save_dotplot(enrich_results$all$mf, "GO_MF_all_overlap", ENRDIR)
+  save_dotplot(enrich_results$all$kegg, "KEGG_all_overlap", ENRDIR)
+  
+  save_dotplot(enrich_results$up$bp, "GO_BP_up_overlap", ENRDIR)
+  save_dotplot(enrich_results$down$bp, "GO_BP_down_overlap", ENRDIR)
+  save_dotplot(enrich_results$up$kegg, "KEGG_up_overlap", ENRDIR)
+  save_dotplot(enrich_results$down$kegg, "KEGG_down_overlap", ENRDIR)
+  
+  # Save barplots
+  save_barplot(enrich_results$all$bp, "GO_BP_all_overlap", ENRDIR)
+  save_barplot(enrich_results$all$cc, "GO_CC_all_overlap", ENRDIR)
+  save_barplot(enrich_results$all$mf, "GO_MF_all_overlap", ENRDIR)
+  save_barplot(enrich_results$all$kegg, "KEGG_all_overlap", ENRDIR)
+  
+  # Print summary
+  cat("\nSaved enrichment results to:\n", normalizePath(ENRDIR), "\n")
+  
+  cat("\nTop KEGG terms (all overlap):\n")
+  if (!is.null(enrich_results$all$kegg) && nrow(as.data.frame(enrich_results$all$kegg)) > 0) {
+    print(as.data.frame(enrich_results$all$kegg)[1:min(10, nrow(as.data.frame(enrich_results$all$kegg))),
+                                                  c("ID","Description","p.adjust","Count")])
+  } else {
+    cat("No significant KEGG terms.\n")
+  }
+  
+  # Panels C & D (Chord + Circle plots)
+  create_chord_circle_plots(
+    deg_file = file.path(OUTDIR, "GSE31547_deg_symbol.csv"),
+    overlap_up_file = file.path(OUTDIR, "overlap_up_symbols.txt"),
+    overlap_down_file = file.path(OUTDIR, "overlap_down_symbols.txt"),
+    enr_dir = ENRDIR
+  )
 } else {
-  cat("No significant KEGG terms.\n")
+  message("\nSkipping enrichment analysis (required packages not available).")
 }
 
-# ============================================================
-# Panels C & D (Chord + Circle plots)
-# ============================================================
-create_chord_circle_plots(
-  deg_file = file.path(OUTDIR, "GSE31547_deg_symbol.csv"),
-  overlap_up_file = file.path(OUTDIR, "overlap_up_symbols.txt"),
-  overlap_down_file = file.path(OUTDIR, "overlap_down_symbols.txt"),
-  enr_dir = ENRDIR
-)
-
-message("\n=== ANALYSIS COMPLETE ===")
+message("\n=== INITIAL ANALYSIS COMPLETE ===")
 message("All results saved to: ", normalizePath(OUTDIR))
 
 # ============================================================
-# HOW TO FIX GROUPING (important!)
+# Run WGCNA Figure 4 Reproduction Analysis
 # ============================================================
-# If the heuristic grouping fails, do this:
-# 1) Inspect sample metadata:
-#    eset <- get_eset("GSE18842")
-#    View(pData(eset)[, c("title","source_name_ch1","characteristics_ch1")])
-#
-# 2) Manually define GSM IDs:
-#    GROUPS_BY_GSE[["GSE18842"]] <- list(
-#      tumor  = c("GSM....", "GSM...."),
-#      normal = c("GSM....", "GSM....")
-#    )
-# Then rerun.
-# ============================================================
+message("\n=== RUNNING WGCNA FIGURE 4 REPRODUCTION ===")
+source("wgcna.R")
+message("\n=== WGCNA FIGURE 4 REPRODUCTION COMPLETE ===")
+
+message("\n=== FULL ANALYSIS PIPELINE COMPLETE ===")
+

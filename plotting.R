@@ -154,18 +154,32 @@ create_chord_circle_plots <- function(deg_file, overlap_up_file, overlap_down_fi
   # PANEL C: Chord plot
   cats <- unique(circ$process$category)
   if (length(cats) >= 2) {
-    png(file.path(enr_dir, "PANEL_C_chord.png"), width = 1400, height = 1000, res = 160)
     ch <- chord_dat(circ, deg_df, cats)
-    GOChord(ch, space = 0.02, gene.order = "logFC", gene.space = 0.25, gene.size = 3)
-    dev.off()
+    if (!is.null(ch) && nrow(ch) > 0) {
+      png(file.path(enr_dir, "PANEL_C_chord.png"), width = 1400, height = 1000, res = 160)
+      GOChord(ch, space = 0.02, gene.order = "logFC", gene.space = 0.25, gene.size = 3)
+      dev.off()
+    } else {
+      warning("Chord data is empty. Skipping PANEL_C_chord.png plot.")
+    }
+  } else {
+    warning("Not enough categories for chord plot. Skipping PANEL_C_chord.png plot.")
   }
-  
+
   # PANEL D: Circle plot
   safe_nsub <- min(10, min(terms_keep$hits))
-  png(file.path(enr_dir, "PANEL_D_circle.png"), width = 1400, height = 1000, res = 160)
-  GOCircle(circ, nsub = safe_nsub)
-  dev.off()
-  
+  if (!is.null(circ) && !is.null(circ$process) && nrow(circ$process) > 0) {
+    png(file.path(enr_dir, "PANEL_D_circle.png"), width = 1400, height = 1000, res = 160)
+    tryCatch({
+      GOCircle(circ, nsub = safe_nsub)
+    }, error = function(e) {
+      warning("GOCircle failed: ", e$message)
+    })
+    dev.off()
+  } else {
+    warning("Circle data is empty. Skipping PANEL_D_circle.png plot.")
+  }
+
   cat("Saved:\n",
       file.path(enr_dir, "PANEL_C_chord.png"), "\n",
       file.path(enr_dir, "PANEL_D_circle.png"), "\n")
