@@ -27,6 +27,15 @@ dir.create(WGCNA_DIR, showWarnings = FALSE, recursive = TRUE)
 # ----------------------------
 # Helpers
 # ----------------------------
+clean_symbols_wgcna <- function(x) {
+  x <- trimws(x)
+  x <- sapply(strsplit(x, " /// "), `[`, 1)
+  x <- gsub("\\s+", "", x)
+  x <- toupper(x)
+  x[x == ""] <- NA_character_
+  x
+}
+
 clean_symbols <- function(x) {
   x <- trimws(x)
   x <- sapply(strsplit(x, " /// "), `[`, 1)   # keep first symbol if "A /// B"
@@ -56,7 +65,7 @@ collapse_by_gene_mean <- function(expr_mat) {
 # ----------------------------
 common_up <- readLines(file.path(OUTDIR, "overlap_up_symbols.txt"))
 common_down <- readLines(file.path(OUTDIR, "overlap_down_symbols.txt"))
-all_overlapping_genes <- unique(clean_symbols(c(common_up, common_down)))
+all_overlapping_genes <- unique(clean_symbols_wgcna(c(common_up, common_down)))
 all_overlapping_genes <- all_overlapping_genes[!is.na(all_overlapping_genes)]
 
 # ----------------------------
@@ -75,11 +84,25 @@ for (gse_id in gse_ids) {
   expr <- maybe_log2(expr)
 
   fdat <- fData(eset)
-  symbols <- extract_symbol(fdat)  # vector aligned with rows(expr)
 
+  # align feature metadata to expression rows first
+  if (!all(rownames(expr) %in% rownames(fdat))) {
+    stop("Feature IDs in expr are not all present in fData for ", gse_id)
+  }
+  fdat <- fdat[rownames(expr), , drop = FALSE]
+
+  # extract symbols from aligned feature data
+  symbols <- extract_symbol(fdat)
   if (is.null(symbols)) stop("No gene symbols extracted for ", gse_id)
 
-  symbols <- clean_symbols(symbols)
+  # use local cleaner that preserves length
+  symbols <- clean_symbols_wgcna(symbols)
+
+  if (length(symbols) != nrow(expr)) {
+    stop("Symbol length mismatch for ", gse_id, ": symbols=", length(symbols),
+         " expr rows=", nrow(expr))
+  }
+
   rownames(expr) <- symbols
 
   # collapse duplicate probes -> one gene
@@ -90,6 +113,7 @@ for (gse_id in gse_ids) {
 
   expr_list[[gse_id]] <- expr_gene
 }
+
 
 # ----------------------------
 # CRITICAL: genes must exist in ALL datasets (intersection)

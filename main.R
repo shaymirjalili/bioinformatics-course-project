@@ -292,5 +292,20 @@ message("\n=== RUNNING WGCNA FIGURE 4 REPRODUCTION ===")
 source("wgcna.R")
 message("\n=== WGCNA FIGURE 4 REPRODUCTION COMPLETE ===")
 
+# ============================================================
+# Run Figure 6 Reproduction Analysis (guarded by GMT file)
+# ============================================================
+message("\n=== RUNNING FIGURE 6 IMMUNE ANALYSIS ===")
+fig6_gmt <- file.path("resources", "immune_signatures_24cells.gmt")
+if (file.exists(fig6_gmt)) {
+  source("figure6_immune_analysis.R")
+  message("\n=== FIGURE 6 IMMUNE ANALYSIS COMPLETE ===")
+} else {
+  message(
+    "\nSkipping Figure 6 immune analysis: missing GMT file at ",
+    normalizePath(fig6_gmt, winslash = "/", mustWork = FALSE)
+  )
+}
+
 message("\n=== FULL ANALYSIS PIPELINE COMPLETE ===")
 
